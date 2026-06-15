@@ -92,10 +92,10 @@ def main():
         left_tag_id=LEFT_TAG_ID,
         right_tag_id=RIGHT_TAG_ID,
         use_fisheye=False,
-        detector_backend="apriltag",   # 用 AprilTag 检测器（需重新打印 tag36h11）
+        detector_backend="aruco",      # 临时：现有视频是 ArUco（换 AprilTag 视频后改回 apriltag）
         apriltag_family="tag36h11",
-        max_std_d=3.0,
-        min_valid_frames=12,
+        max_std_d=20.0,                # 放宽：未做鱼眼校正，marker 抖动较大
+        min_valid_frames=5,            # 放宽：5 帧即可标定
     )
 
     # 3. 自动化标定：从全视频找最佳帧
