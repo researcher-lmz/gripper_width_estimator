@@ -1,9 +1,13 @@
 """
 UMI Gripper Width Estimator
 #input: fisheye camera image
-output: Detects ArUco markers
-1.Detects ArUco markers on left/right gripper fingers from a fisheye camera image
+output: Detects fiducial markers (AprilTag by default, ArUco optional)
+1.Detects AprilTag (tag36h11) / ArUco markers on left/right gripper fingers
 2.and estimates gripper opening width in millimeters via two-point calibration.
+
+检测器后端可切换：
+  detector_backend="apriltag"  → 用 pupil-apriltags（默认，鲁棒，推荐 tag36h11）
+  detector_backend="aruco"     → 用 OpenCV ArUco（合成测试视频用）
 """
 
 import time
@@ -88,6 +92,11 @@ class GripperWidthEstimator:
         max_lost_frames_hold: int = 3,
         max_width_jump_per_frame_mm: float = 10.0,
         width_out_of_range_tolerance_mm: float = 5.0,
+        detector_backend: str = "apriltag",       # "apriltag" 或 "aruco"
+        apriltag_family: str = "tag36h11",         # AprilTag 家族
+        apriltag_min_margin: float = 30.0,         # 检测置信度阈值，过滤弱检测
+        apriltag_quad_decimate: float = 1.0,       # 1.0=不降采样，小/畸变 tag 用 1.0
+        apriltag_nthreads: int = 4,
     ):
         self.max_width_mm = max_width_mm
         self.left_tag_id = left_tag_id
@@ -104,19 +113,42 @@ class GripperWidthEstimator:
         self.distortion_coeffs = distortion_coeffs
         self.use_fisheye = use_fisheye
 
-        self.aruco_dict = _get_aruco_dict(aruco_dict_name)
-        self.aruco_params = cv2.aruco.DetectorParameters()
-        # Relax adaptive threshold for synthetic images
-        try:
-            self.aruco_params.adaptiveThreshWinSizeMin = 3
-            self.aruco_params.adaptiveThreshWinSizeMax = 30
-            self.aruco_params.adaptiveThreshWinSizeStep = 5
-            self.aruco_params.minMarkerPerimeterRate = 0.02
-            self.aruco_params.maxMarkerPerimeterRate = 4.0
-            self.aruco_params.polygonalApproxAccuracyRate = 0.05
-            self.aruco_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-        except AttributeError:
-            pass
+        self.detector_backend = detector_backend.lower()
+        self.apriltag_family = apriltag_family
+        self.apriltag_min_margin = apriltag_min_margin
+        self.apriltag_detector = None
+
+        if self.detector_backend == "apriltag":
+            # AprilTag 后端：检测更鲁棒（运动模糊/光照/畸变/倾斜）
+            try:
+                from pupil_apriltags import Detector
+            except ImportError as e:
+                raise ImportError(
+                    "AprilTag backend requires pupil-apriltags. "
+                    "Install with: pip install pupil-apriltags"
+                ) from e
+            self.apriltag_detector = Detector(
+                families=apriltag_family,
+                nthreads=apriltag_nthreads,
+                quad_decimate=apriltag_quad_decimate,
+                quad_sigma=0.0,
+                refine_edges=1,
+                decode_sharpening=0.25,
+            )
+        else:
+            # ArUco 后端（保留兼容，主要用于合成测试视频）
+            self.aruco_dict = _get_aruco_dict(aruco_dict_name)
+            self.aruco_params = cv2.aruco.DetectorParameters()
+            try:
+                self.aruco_params.adaptiveThreshWinSizeMin = 3
+                self.aruco_params.adaptiveThreshWinSizeMax = 30
+                self.aruco_params.adaptiveThreshWinSizeStep = 5
+                self.aruco_params.minMarkerPerimeterRate = 0.02
+                self.aruco_params.maxMarkerPerimeterRate = 4.0
+                self.aruco_params.polygonalApproxAccuracyRate = 0.05
+                self.aruco_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+            except AttributeError:
+                pass
 
         # Calibration state
         self._closed_distances: List[float] = []
@@ -148,15 +180,30 @@ class GripperWidthEstimator:
         return undist.reshape(-1, 2)
 
     def detect_markers(self, frame: np.ndarray) -> Dict:
-        """Detect ArUco markers and return per-id corners & center.
+        """Detect fiducial markers (AprilTag or ArUco) and return per-id corners & center.
 
         Returns:
             dict mapping tag_id -> {"corners": ndarray(4,2), "center": ndarray(2)}
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-        corners, ids = _detect_markers_compat(gray, self.aruco_dict, self.aruco_params)
-
         result: Dict = {}
+
+        if self.detector_backend == "apriltag":
+            detections = self.apriltag_detector.detect(gray)
+            for d in detections:
+                # 过滤弱检测，降低误检
+                if d.decision_margin < self.apriltag_min_margin:
+                    continue
+                c = np.asarray(d.corners, dtype=np.float64).reshape(4, 2)
+                c = self._undistort_points(c)
+                result[int(d.tag_id)] = {
+                    "corners": c,
+                    "center": c.mean(axis=0),
+                }
+            return result
+
+        # ArUco 后端
+        corners, ids = _detect_markers_compat(gray, self.aruco_dict, self.aruco_params)
         if ids is None or len(ids) == 0:
             return result
 

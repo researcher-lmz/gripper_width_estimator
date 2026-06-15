@@ -92,8 +92,10 @@ def main():
         left_tag_id=LEFT_TAG_ID,
         right_tag_id=RIGHT_TAG_ID,
         use_fisheye=False,
-        max_std_d=3.0,          
-        min_valid_frames=12,       
+        detector_backend="apriltag",   # 用 AprilTag 检测器（需重新打印 tag36h11）
+        apriltag_family="tag36h11",
+        max_std_d=3.0,
+        min_valid_frames=12,
     )
 
     # 3. 自动化标定：从全视频找最佳帧
