@@ -20,7 +20,6 @@ analysis_output/
 detected_image/
 outputs/
 
-# Data directories (large files - consider uploading separately if needed)
-# clean_bowl_00000/
-# data_collection_video1/
-# sample_image/
+# Data directories (large files - upload separately if needed)
+clean_bowl_00000/
+data_collection_video1/

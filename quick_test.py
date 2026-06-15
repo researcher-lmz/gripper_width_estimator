@@ -92,8 +92,8 @@ def main():
         left_tag_id=LEFT_TAG_ID,
         right_tag_id=RIGHT_TAG_ID,
         use_fisheye=False,
-        max_std_d=20.0,           # 放宽：未做鱼眼校正，marker 抖动较大
-        min_valid_frames=5,       # 放宽：不需要 12 帧，5 帧就够了
+        max_std_d=3.0,           # 放宽：未做鱼眼校正，marker 抖动较大
+        min_valid_frames=12,       # 放宽：不需要 12 帧，5 帧就够了
     )
 
     # 3. 自动化标定：从全视频找最佳帧

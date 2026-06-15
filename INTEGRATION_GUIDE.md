@@ -412,6 +412,41 @@ Done.
 
 放宽条件后，输出成功，输出如下
 
+```
+(x) MacBookAir:gripper_width_estimator limingzhe$ python quick_test.py 
+Loaded 3613 frames from data_collection_video1/wrist_left_camera.mp4
+Frame size: 800x800
+Duration: 60.2s
+
+--- 自动搜索标定帧 ---
+
+全视频共 1334 帧同时检测到两个 marker
+闭合标定 (最小像素距离 20 帧):
+  d ≈ 277.4 ± 12.36 px (std=12.36)
+  帧范围: 1345~2631 (分散度 1286 帧)
+  前 5 帧: [(2452, 221.0), (1345, 270.5), (2441, 275.4), (2437, 276.4), (2440, 276.5)]
+
+全开标定 (最大像素距离 20 帧):
+  d ≈ 586.3 ± 1.68 px (std=1.68)
+  帧范围: 1560~2495 (分散度 935 帧)
+  前 5 帧: [(2244, 585.0), (2379, 585.3), (2494, 585.4), (2495, 585.4), (2478, 585.8)]
+
+  delta = 308.9 px
+
+--- Calibration ---
+  Result: ✓ PASS (OK)
+  d_closed=277.43 px
+  d_open  =586.30 px
+  delta   =308.87 px
+
+--- Running estimation (press Q to quit) ---
+Saving visualized video to: outputs/visualized_result.mp4
+2026-06-15 15:42:30.675 python[18110:263226] +[IMKClient subclass]: chose IMKClient_Modern
+2026-06-15 15:42:30.675 python[18110:263226] +[IMKInputSession subclass]: chose IMKInputSession_Modern
+Visualized video saved to: outputs/visualized_result.mp4
+Done.
+```
+
 分析原因：
 
 1.仍需要鱼眼相机标注得到K、D，进而减小std，marker的抖动
@@ -421,3 +456,5 @@ Done.
 标注完相机之后改回原来的参数
 
 ![image-20260615153809847](/Users/limingzhe/Library/Application Support/typora-user-images/image-20260615153809847.png)
+
+![image-20260615160454091](/Users/limingzhe/Library/Application Support/typora-user-images/image-20260615160454091.png)
