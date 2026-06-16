@@ -453,8 +453,8 @@ Done.
 
 2.改进算法
 
-标注完相机之后改回原来的参数
 
-![image-20260615153809847](/Users/limingzhe/Library/Application Support/typora-user-images/image-20260615153809847.png)
 
 ![image-20260615160454091](/Users/limingzhe/Library/Application Support/typora-user-images/image-20260615160454091.png)
+
+![image-20260615213403067](/Users/limingzhe/Library/Application Support/typora-user-images/image-20260615213403067.png)

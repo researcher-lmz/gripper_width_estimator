@@ -12,59 +12,76 @@ from gripper_width_estimator import GripperWidthEstimator
 # ============================ 配置区 ============================
 MAX_WIDTH_MM = 81                  # 夹爪最大物理开口 (mm)
 LEFT_TAG_ID = 0
-RIGHT_TAG_ID = 1
-VIDEO_PATH = "data_collection_video1/wrist_left_camera.mp4"
+RIGHT_TAG_ID = 11                 #如果哪天算法要用到方向/正负号（比如判断夹爪在画面里往左还是往右动），那左右就必须分清。
+                                  #但当前只算距离，无所谓。
+VIDEO_PATH = "umi_dataset_20260616_163156/clean_bowl_00003/wrist_right_camera.mp4"
 FPS = 60                           # 采集帧率
 CALIB_N_FRAMES = 20                # 标定用多少帧
 OUTPUT_VIDEO = "outputs/visualized_result.mp4"   # 输出视频路径
+
+# 鱼眼去畸变：实验证明有 ROI 后去畸变没必要（精度相当甚至略好），关掉更简单
+USE_FISHEYE = False
+CALIB_FILE = "fisheye_calib_wrist_right.npz"   # 仅 USE_FISHEYE=True 时用
+
+# ROI：相机刚性装在自己夹爪上，自己的 tag 总在画面底部固定区域；
+# 用 ROI 排除另一只夹爪的同 ID(0/11) tag 误检。按你的相机视角调整。
+# 格式 (x_min, y_min, x_max, y_max) 原始像素，画面 1200x1200
+DETECTION_ROI = (0, 1050, 1200, 1200)
+
+MAX_STD_D = 15.0                   # 稳定段标定阈值（原始像素）
+STABLE_WIN = 30                    # 稳定段窗口大小（帧）
+STABLE_STD_MAX = 10.0              # 窗口内 std 小于此值才算"稳定保持"
 # ================================================================
 
 
-def find_best_calibration_frames(frames, estimator):
-    """从全视频中找到最闭合和最张开的有两个 marker 的帧"""
-    all_both = []  # [(frame_idx, distance)]
+def find_stable_calibration_frames(frames, estimator):
+    """用"稳定保持段"标定，而不是全局最小/最大帧。
 
+    全局最小/最大会选到偶发误检和边缘放大帧（鱼眼边缘亚像素误差被放大）。
+    稳定段 = 连续 STABLE_WIN 帧且 std 很小 = 夹爪被特意保持不动的标定姿态，
+    天然排除偶发/边缘帧。最闭合稳定段→d_closed，最张开稳定段→d_open。
+    """
+    n = len(frames)
+    dists = np.full(n, np.nan)
     for i, frame in enumerate(frames):
         d, *_ = estimator.compute_marker_distance(frame)
         if d is not None:
-            all_both.append((i, d))
+            dists[i] = d
 
-    all_both.sort(key=lambda x: x[1])  # 按距离从小到大
+    n_valid = int(np.sum(~np.isnan(dists)))
+    print(f"\n全视频 {n} 帧, 双tag检测 {n_valid} 帧 ({100*n_valid/n:.1f}%)")
+    print(f"距离范围: {np.nanmin(dists):.0f}~{np.nanmax(dists):.0f} px")
 
-    n = len(all_both)
-    if n < CALIB_N_FRAMES * 2:
-        print(f"[ERROR] Only {n} frames with both markers, need at least {CALIB_N_FRAMES*2}")
+    # 滚动窗口找稳定段
+    W = STABLE_WIN
+    segments = []  # (start, median, std)
+    i = 0
+    while i <= n - W:
+        win = dists[i:i + W]
+        good = win[~np.isnan(win)]
+        if len(good) >= W * 0.9 and good.std() < STABLE_STD_MAX:
+            segments.append((i, float(np.median(good)), float(good.std())))
+        i += 5
+
+    if not segments:
+        print("[ERROR] 没找到稳定保持段。夹爪标定时要完全闭合/张开各保持 1~2 秒")
         return [], []
 
-    closed_list = all_both[:CALIB_N_FRAMES]        # 距离最小的 N 帧
-    open_list = all_both[-CALIB_N_FRAMES:]          # 距离最大的 N 帧
+    # 最闭合 = median 最小的稳定段；最张开 = median 最大的稳定段
+    closed_seg = min(segments, key=lambda s: s[1])
+    open_seg = max(segments, key=lambda s: s[1])
 
-    # 统计
-    closed_ds = [d for _, d in closed_list]
-    open_ds = [d for _, d in open_list]
-    closed_median = np.median(closed_ds)
-    open_median = np.median(open_ds)
-    closed_std = np.std(closed_ds)
-    open_std = np.std(open_ds)
+    def seg_frames(seg):
+        start = seg[0]
+        idxs = [j for j in range(start, start + W) if not np.isnan(dists[j])]
+        return [frames[j] for j in idxs], idxs
 
-    print(f"\n全视频共 {n} 帧同时检测到两个 marker")
-    print(f"闭合标定 (最小像素距离 {CALIB_N_FRAMES} 帧):")
-    print(f"  d ≈ {closed_median:.1f} ± {closed_std:.2f} px (std={closed_std:.2f})")
-    closed_frames_idxs = sorted([f for f, _ in closed_list])
-    print(f"  帧范围: {closed_frames_idxs[0]}~{closed_frames_idxs[-1]} (分散度 {closed_frames_idxs[-1]-closed_frames_idxs[0]} 帧)")
-    print(f"  前 5 帧: {[(f, round(d,1)) for f,d in closed_list[:5]]}")
+    closed_frames, c_idxs = seg_frames(closed_seg)
+    open_frames, o_idxs = seg_frames(open_seg)
 
-    print(f"\n全开标定 (最大像素距离 {CALIB_N_FRAMES} 帧):")
-    print(f"  d ≈ {open_median:.1f} ± {open_std:.2f} px (std={open_std:.2f})")
-    open_frames_idxs = sorted([f for f, _ in open_list])
-    print(f"  帧范围: {open_frames_idxs[0]}~{open_frames_idxs[-1]} (分散度 {open_frames_idxs[-1]-open_frames_idxs[0]} 帧)")
-    print(f"  前 5 帧: {[(f, round(d,1)) for f,d in open_list[:5]]}")
-
-    print(f"\n  delta = {open_median - closed_median:.1f} px")
-
-    # 提取实际帧
-    closed_frames = [frames[f] for f, _ in closed_list]
-    open_frames = [frames[f] for f, _ in open_list]
+    print(f"\n闭合稳定段: 帧 {c_idxs[0]}~{c_idxs[-1]}, d≈{closed_seg[1]:.1f} std={closed_seg[2]:.2f}")
+    print(f"全开稳定段: 帧 {o_idxs[0]}~{o_idxs[-1]}, d≈{open_seg[1]:.1f} std={open_seg[2]:.2f}")
+    print(f"delta = {open_seg[1]-closed_seg[1]:.1f} px")
 
     return closed_frames, open_frames
 
@@ -86,21 +103,34 @@ def main():
     print(f"Frame size: {frames[0].shape[1]}x{frames[0].shape[0]}")
     print(f"Duration: {len(frames)/FPS:.1f}s")
 
+    # 加载鱼眼标定 K/D
+    K, D = None, None
+    if USE_FISHEYE:
+        import os
+        if not os.path.exists(CALIB_FILE):
+            raise FileNotFoundError(f"找不到鱼眼标定文件 {CALIB_FILE}，先跑 calibrate_fisheye.py")
+        cal = np.load(CALIB_FILE)
+        K, D = cal["K"], cal["D"]
+        print(f"已加载鱼眼标定 {CALIB_FILE}: fx={K[0,0]:.1f} cx={K[0,2]:.1f} cy={K[1,2]:.1f}")
+
     # 2. 初始化估计器
     estimator = GripperWidthEstimator(
         max_width_mm=MAX_WIDTH_MM,
         left_tag_id=LEFT_TAG_ID,
         right_tag_id=RIGHT_TAG_ID,
-        use_fisheye=False,
-        detector_backend="aruco",      # 临时：现有视频是 ArUco（换 AprilTag 视频后改回 apriltag）
+        use_fisheye=USE_FISHEYE,
+        camera_matrix=K,
+        distortion_coeffs=D,
+        detector_backend="apriltag",   # AprilTag 后端（tag36h11）
         apriltag_family="tag36h11",
-        max_std_d=20.0,                # 放宽：未做鱼眼校正，marker 抖动较大
-        min_valid_frames=5,            # 放宽：5 帧即可标定
+        detection_roi=DETECTION_ROI,   # ROI 排除另一夹爪的同 ID tag 误检
+        max_std_d=MAX_STD_D,
+        min_valid_frames=12,
     )
 
     # 3. 自动化标定：从全视频找最佳帧
     print("\n--- 自动搜索标定帧 ---")
-    closed_frames, open_frames = find_best_calibration_frames(frames, estimator)
+    closed_frames, open_frames = find_stable_calibration_frames(frames, estimator)
 
     if not closed_frames:
         print("标定帧不足，退出")
@@ -126,36 +156,70 @@ def main():
     # 4. 逐帧估计 + 可视化
     print("\n--- Running estimation (press Q to quit) ---")
 
-    # 准备输出视频
+    # 准备输出视频（先写临时文件，结束后按"时间戳+检测率"重命名，避免覆盖）
     import os
-    os.makedirs(os.path.dirname(OUTPUT_VIDEO) or ".", exist_ok=True)
+    import datetime
+    out_dir = os.path.dirname(OUTPUT_VIDEO) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    tmp_path = os.path.join(out_dir, f"visualized_{timestamp}.tmp.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     h, w = frames[0].shape[:2]
-    out_writer = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, FPS, (w, h))
-    print(f"Saving visualized video to: {OUTPUT_VIDEO}")
+    out_writer = cv2.VideoWriter(tmp_path, fourcc, FPS, (w, h))
+    print(f"Saving visualized video (timestamp={timestamp}) ...")
 
     estimator.reset_episode()
 
+    # 可视化用的"原始坐标"检测器：开鱼眼后 result 里存的是校正后坐标，
+    # 画在原始畸变图上会错位，所以单独做一次原始检测来画框（只为显示，不参与计算）
+    from pupil_apriltags import Detector as _ATDet
+    raw_det = _ATDet(families="tag36h11", nthreads=1, quad_decimate=1.0,
+                     quad_sigma=0.0, refine_edges=1, decode_sharpening=0.25)
+
+    def _in_roi(ctr):
+        if DETECTION_ROI is None:
+            return True
+        x0, y0, x1, y1 = DETECTION_ROI
+        return x0 <= ctr[0] <= x1 and y0 <= ctr[1] <= y1
+
+    n_detected = 0       # 视觉直接检测到（valid=True）的帧数
+    n_total = 0          # 实际处理的帧数
+
     for i, frame in enumerate(frames):
         result = estimator.estimate(frame, timestamp=i / FPS)
+        n_total += 1
+        if result.valid:
+            n_detected += 1
 
         vis = frame.copy()
 
-        # 画 marker 边框和中心
-        if result.left_corners is not None:
-            pts = result.left_corners.astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(vis, [pts], True, (0, 255, 0), 2)
-            cv2.circle(vis, (int(result.left_center[0]), int(result.left_center[1])),
-                       5, (0, 255, 0), -1)
-        if result.right_corners is not None:
-            pts = result.right_corners.astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(vis, [pts], True, (255, 0, 0), 2)
-            cv2.circle(vis, (int(result.right_center[0]), int(result.right_center[1])),
-                       5, (255, 0, 0), -1)
-        if result.left_center is not None and result.right_center is not None:
-            cv2.line(vis,
-                     (int(result.left_center[0]), int(result.left_center[1])),
-                     (int(result.right_center[0]), int(result.right_center[1])),
+        # 画 ROI 框（青色虚线区域），让人看清有效检测区
+        if DETECTION_ROI is not None:
+            x0, y0, x1, y1 = DETECTION_ROI
+            cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 255, 0), 1)
+
+        # 用原始检测画框，但套上 ROI + 同 ID 取 margin 最高（和估计器一致）
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        best = {}
+        for d in raw_det.detect(gray):
+            if d.tag_id not in (LEFT_TAG_ID, RIGHT_TAG_ID):
+                continue
+            ctr = np.asarray(d.corners).mean(axis=0)
+            if not _in_roi(ctr):
+                continue
+            if d.tag_id not in best or d.decision_margin > best[d.tag_id].decision_margin:
+                best[d.tag_id] = d
+        raw_centers = {}
+        for tid, d in best.items():
+            c = np.asarray(d.corners, dtype=np.int32).reshape(-1, 1, 2)
+            ctr = np.asarray(d.corners).mean(axis=0)
+            raw_centers[tid] = ctr
+            col = (0, 255, 0) if tid == LEFT_TAG_ID else (255, 0, 0)
+            cv2.polylines(vis, [c], True, col, 2)
+            cv2.circle(vis, (int(ctr[0]), int(ctr[1])), 5, col, -1)
+        if LEFT_TAG_ID in raw_centers and RIGHT_TAG_ID in raw_centers:
+            lc, rc = raw_centers[LEFT_TAG_ID], raw_centers[RIGHT_TAG_ID]
+            cv2.line(vis, (int(lc[0]), int(lc[1])), (int(rc[0]), int(rc[1])),
                      (0, 255, 255), 2)
 
         # 显示数据
@@ -181,7 +245,13 @@ def main():
 
     out_writer.release()
     cv2.destroyAllWindows()
-    print(f"Visualized video saved to: {OUTPUT_VIDEO}")
+
+    # 按检测率重命名（文件名含时间戳 + 检测率，每次运行都是新文件）
+    det_rate = (100.0 * n_detected / n_total) if n_total else 0.0
+    final_path = os.path.join(out_dir, f"visualized_{timestamp}_det{det_rate:.1f}pct.mp4")
+    os.replace(tmp_path, final_path)
+    print(f"Detection rate: {n_detected}/{n_total} = {det_rate:.1f}%")
+    print(f"Visualized video saved to: {final_path}")
     print("Done.")
 
 

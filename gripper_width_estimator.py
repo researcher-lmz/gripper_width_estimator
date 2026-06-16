@@ -96,7 +96,12 @@ class GripperWidthEstimator:
         apriltag_family: str = "tag36h11",         # AprilTag 家族
         apriltag_min_margin: float = 30.0,         # 检测置信度阈值，过滤弱检测
         apriltag_quad_decimate: float = 1.0,       # 1.0=不降采样，小/畸变 tag 用 1.0
-        apriltag_nthreads: int = 4,
+        apriltag_nthreads: int = 1,                # 必须=1！nthreads>1 在边缘/临界帧有竞态，
+                                                   # 同帧检测结果会跳变，导致标定/估计不可复现
+        detection_roi: Optional[Tuple[int, int, int, int]] = None,
+                                                   # (x_min, y_min, x_max, y_max) 原始像素 ROI。
+                                                   # 相机刚性装在自己夹爪上→自己的 tag 总在固定区域，
+                                                   # 用 ROI 排除另一只夹爪的同 ID tag 误检。None=不限制
     ):
         self.max_width_mm = max_width_mm
         self.left_tag_id = left_tag_id
@@ -116,6 +121,7 @@ class GripperWidthEstimator:
         self.detector_backend = detector_backend.lower()
         self.apriltag_family = apriltag_family
         self.apriltag_min_margin = apriltag_min_margin
+        self.detection_roi = detection_roi
         self.apriltag_detector = None
 
         if self.detector_backend == "apriltag":
@@ -179,6 +185,14 @@ class GripperWidthEstimator:
         undist = cv2.fisheye.undistortPoints(pts_in, K, D, P=K)
         return undist.reshape(-1, 2)
 
+    def _in_roi(self, raw_center: np.ndarray) -> bool:
+        """Check if a raw (distorted) marker center is inside the detection ROI."""
+        if self.detection_roi is None:
+            return True
+        x_min, y_min, x_max, y_max = self.detection_roi
+        x, y = raw_center
+        return x_min <= x <= x_max and y_min <= y <= y_max
+
     def detect_markers(self, frame: np.ndarray) -> Dict:
         """Detect fiducial markers (AprilTag or ArUco) and return per-id corners & center.
 
@@ -190,16 +204,21 @@ class GripperWidthEstimator:
 
         if self.detector_backend == "apriltag":
             detections = self.apriltag_detector.detect(gray)
+            # 先按 ID 收集所有候选（margin + ROI 过滤），同 ID 多个时保留 margin 最高的
+            best: Dict[int, object] = {}
             for d in detections:
-                # 过滤弱检测，降低误检
                 if d.decision_margin < self.apriltag_min_margin:
                     continue
+                raw_center = np.asarray(d.corners, dtype=np.float64).reshape(4, 2).mean(axis=0)
+                if not self._in_roi(raw_center):
+                    continue
+                tid = int(d.tag_id)
+                if tid not in best or d.decision_margin > best[tid].decision_margin:
+                    best[tid] = d
+            for tid, d in best.items():
                 c = np.asarray(d.corners, dtype=np.float64).reshape(4, 2)
                 c = self._undistort_points(c)
-                result[int(d.tag_id)] = {
-                    "corners": c,
-                    "center": c.mean(axis=0),
-                }
+                result[tid] = {"corners": c, "center": c.mean(axis=0)}
             return result
 
         # ArUco 后端

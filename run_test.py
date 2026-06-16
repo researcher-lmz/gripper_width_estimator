@@ -224,6 +224,7 @@ def main():
         left_tag_id=args.left_tag_id,
         right_tag_id=args.right_tag_id,
         smoothing_alpha=args.smoothing_alpha,
+        detector_backend="aruco",   # 合成测试视频用 ArUco marker（核心算法的 ground-truth 回归测试）
     )
 
     # --- Calibration ---
