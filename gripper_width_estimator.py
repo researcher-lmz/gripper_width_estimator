@@ -79,6 +79,10 @@ class GripperWidthEstimator:
     def __init__(
         self,
         max_width_mm: float = 45.0,
+        closed_width_mm: float = 0.0,           # d_closed 对应的物理量(mm)
+        open_width_mm: Optional[float] = None,  # d_open 对应的物理量(mm)；None→用 max_width_mm
+        #   两点线性标定的两端物理值。默认 (0, max_width_mm) = 输出"开合程度"。
+        #   想输出"两 marker 物理距离"：closed_width_mm=闭合实测, open_width_mm=全开实测
         left_tag_id: int = 0,
         right_tag_id: int = 1,
         aruco_dict_name: str = "DICT_4X4_50",
@@ -104,6 +108,9 @@ class GripperWidthEstimator:
                                                    # 用 ROI 排除另一只夹爪的同 ID tag 误检。None=不限制
     ):
         self.max_width_mm = max_width_mm
+        # 两点线性标定的物理端点值
+        self.closed_width_mm = closed_width_mm
+        self.open_width_mm = open_width_mm if open_width_mm is not None else max_width_mm
         self.left_tag_id = left_tag_id
         self.right_tag_id = right_tag_id
         self.smoothing_alpha = smoothing_alpha
@@ -348,8 +355,12 @@ class GripperWidthEstimator:
 
         if d is not None:
             self._lost_frame_count = 0
-            raw_mm = self.max_width_mm * (d - self.d_closed) / (self.d_open - self.d_closed)
-            raw_mm_clipped = float(np.clip(raw_mm, 0, self.max_width_mm))
+            # 两点线性标定：(d_closed → closed_width_mm), (d_open → open_width_mm)
+            # clip 到标定物理范围 [closed, open]。open 锚点取自机械最大开合
+            # （硬件限位），任务里开不到更大，所以不需要外推余量。
+            lo, hi = self.closed_width_mm, self.open_width_mm
+            raw_mm = lo + (hi - lo) * (d - self.d_closed) / (self.d_open - self.d_closed)
+            raw_mm_clipped = float(np.clip(raw_mm, min(lo, hi), max(lo, hi)))
 
             if self._last_smooth_width is None:
                 smooth = raw_mm_clipped

@@ -30,3 +30,7 @@ fisheye_undistort_check.jpg
 clean_bowl_00000/
 data_collection_video1/
 umi_dataset_*/
+dataset_*/
+
+# Video files (recordings / calibration clips - not versioned)
+*.mp4

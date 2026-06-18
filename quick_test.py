@@ -10,11 +10,19 @@ import numpy as np
 from gripper_width_estimator import GripperWidthEstimator
 
 # ============================ 配置区 ============================
-MAX_WIDTH_MM = 81                  # 夹爪最大物理开口 (mm)
+# 输出"两 marker 中心物理距离"(mm)：两端实测值锚定（两点线性标定）
+#   闭合 = 闭合时两 marker 中心实测距离
+#   全开 = 机械最大开合时两 marker 中心实测距离（夹爪已硬件限位在此）
+CLOSED_DIST_MM = 37.7
+OPEN_DIST_MM = 108.71
+
 LEFT_TAG_ID = 0
 RIGHT_TAG_ID = 11                 #如果哪天算法要用到方向/正负号（比如判断夹爪在画面里往左还是往右动），那左右就必须分清。
                                   #但当前只算距离，无所谓。
-VIDEO_PATH = "umi_dataset_20260616_163156/clean_bowl_00003/wrist_right_camera.mp4"
+VIDEO_PATH = "/Users/limingzhe/all_github_code/gripper_width_estimator/dataset_06172023/wrist_left_camera.mp4"   # 要估计的任务视频
+# 标定专用片段（闭合保持 + 张开到边缘最大保持）。None = 从 VIDEO_PATH 自标定。
+# 任务视频里开口会比标定大，所以标定要用单独控制的片段，避免选错 open 锚点。
+CALIB_VIDEO = "/Users/limingzhe/all_github_code/gripper_width_estimator/标定片段.mp4"
 FPS = 60                           # 采集帧率
 CALIB_N_FRAMES = 20                # 标定用多少帧
 OUTPUT_VIDEO = "outputs/visualized_result.mp4"   # 输出视频路径
@@ -31,6 +39,9 @@ DETECTION_ROI = (0, 1050, 1200, 1200)
 MAX_STD_D = 15.0                   # 稳定段标定阈值（原始像素）
 STABLE_WIN = 30                    # 稳定段窗口大小（帧）
 STABLE_STD_MAX = 10.0              # 窗口内 std 小于此值才算"稳定保持"
+
+# 后处理：对漏检帧做线性插值回填（离线数采推荐开；实时控制不要开）
+USE_POST_PROCESS = True
 # ================================================================
 
 
@@ -86,12 +97,10 @@ def find_stable_calibration_frames(frames, estimator):
     return closed_frames, open_frames
 
 
-def main():
-    # 1. 加载视频
-    cap = cv2.VideoCapture(VIDEO_PATH)
+def load_video_frames(path):
+    cap = cv2.VideoCapture(path)
     if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open video: {VIDEO_PATH}")
-
+        raise FileNotFoundError(f"Cannot open video: {path}")
     frames = []
     while True:
         ret, frame = cap.read()
@@ -99,6 +108,12 @@ def main():
             break
         frames.append(frame)
     cap.release()
+    return frames
+
+
+def main():
+    # 1. 加载任务视频
+    frames = load_video_frames(VIDEO_PATH)
     print(f"Loaded {len(frames)} frames from {VIDEO_PATH}")
     print(f"Frame size: {frames[0].shape[1]}x{frames[0].shape[0]}")
     print(f"Duration: {len(frames)/FPS:.1f}s")
@@ -115,7 +130,8 @@ def main():
 
     # 2. 初始化估计器
     estimator = GripperWidthEstimator(
-        max_width_mm=MAX_WIDTH_MM,
+        closed_width_mm=CLOSED_DIST_MM,   # 闭合 marker 距离
+        open_width_mm=OPEN_DIST_MM,       # 机械全开 marker 距离
         left_tag_id=LEFT_TAG_ID,
         right_tag_id=RIGHT_TAG_ID,
         use_fisheye=USE_FISHEYE,
@@ -128,9 +144,15 @@ def main():
         min_valid_frames=12,
     )
 
-    # 3. 自动化标定：从全视频找最佳帧
+    # 3. 自动化标定：优先用专用标定片段，否则从任务视频自标定
     print("\n--- 自动搜索标定帧 ---")
-    closed_frames, open_frames = find_stable_calibration_frames(frames, estimator)
+    if CALIB_VIDEO:
+        calib_frames = load_video_frames(CALIB_VIDEO)
+        print(f"从专用标定片段标定: {CALIB_VIDEO} ({len(calib_frames)} 帧)")
+    else:
+        calib_frames = frames
+        print("从任务视频自标定（注意：任务里开口若超过标定姿态会外推）")
+    closed_frames, open_frames = find_stable_calibration_frames(calib_frames, estimator)
 
     if not closed_frames:
         print("标定帧不足，退出")
@@ -168,8 +190,25 @@ def main():
     out_writer = cv2.VideoWriter(tmp_path, fourcc, FPS, (w, h))
     print(f"Saving visualized video (timestamp={timestamp}) ...")
 
+    # ---- Pass 1: 逐帧估计，收集结果 ----
     estimator.reset_episode()
+    results = [estimator.estimate(frame, timestamp=i / FPS)
+               for i, frame in enumerate(frames)]
+    n_vision = sum(1 for r in results if r.valid)
 
+    # ---- 后处理：对漏检帧线性插值回填 ----
+    if USE_POST_PROCESS:
+        results = estimator.post_process(results)
+        n_interp = sum(1 for r in results if r.source == "interpolated")
+        n_hold = sum(1 for r in results if r.source == "last_valid_hold")
+        print(f"后处理: 视觉检测 {n_vision} 帧, 插值补回 {n_interp} 帧, 边界保持 {n_hold} 帧")
+    else:
+        n_interp = n_hold = 0
+
+    # 可用帧 = 有 width 的帧（视觉 + 插值 + 保持）
+    n_usable = sum(1 for r in results if r.width_smooth_mm is not None)
+
+    # ---- Pass 2: 画可视化视频 ----
     # 可视化用的"原始坐标"检测器：开鱼眼后 result 里存的是校正后坐标，
     # 画在原始畸变图上会错位，所以单独做一次原始检测来画框（只为显示，不参与计算）
     from pupil_apriltags import Detector as _ATDet
@@ -182,14 +221,8 @@ def main():
         x0, y0, x1, y1 = DETECTION_ROI
         return x0 <= ctr[0] <= x1 and y0 <= ctr[1] <= y1
 
-    n_detected = 0       # 视觉直接检测到（valid=True）的帧数
-    n_total = 0          # 实际处理的帧数
-
     for i, frame in enumerate(frames):
-        result = estimator.estimate(frame, timestamp=i / FPS)
-        n_total += 1
-        if result.valid:
-            n_detected += 1
+        result = results[i]
 
         vis = frame.copy()
 
@@ -222,8 +255,15 @@ def main():
             cv2.line(vis, (int(lc[0]), int(lc[1])), (int(rc[0]), int(rc[1])),
                      (0, 255, 255), 2)
 
-        # 显示数据
-        color = (0, 255, 0) if result.valid else (0, 0, 255)
+        # 显示数据：绿=视觉检测, 黄=插值补回, 红=无数据
+        if result.source == "vision_aruco":
+            color = (0, 255, 0)
+        elif result.source == "interpolated":
+            color = (0, 255, 255)
+        elif result.source == "last_valid_hold":
+            color = (0, 165, 255)
+        else:
+            color = (0, 0, 255)
         width_text = f"{result.width_smooth_mm:.2f} mm" if result.width_smooth_mm is not None else "N/A"
         cv2.putText(vis, f"Frame: {i}/{len(frames)}", (20, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
@@ -246,11 +286,15 @@ def main():
     out_writer.release()
     cv2.destroyAllWindows()
 
-    # 按检测率重命名（文件名含时间戳 + 检测率，每次运行都是新文件）
-    det_rate = (100.0 * n_detected / n_total) if n_total else 0.0
-    final_path = os.path.join(out_dir, f"visualized_{timestamp}_det{det_rate:.1f}pct.mp4")
+    # 按检测率重命名（文件名含时间戳 + 视觉检测率，每次运行都是新文件）
+    total = len(frames)
+    vis_rate = 100.0 * n_vision / total if total else 0.0
+    usable_rate = 100.0 * n_usable / total if total else 0.0
+    final_path = os.path.join(out_dir, f"visualized_{timestamp}_det{vis_rate:.1f}pct.mp4")
     os.replace(tmp_path, final_path)
-    print(f"Detection rate: {n_detected}/{n_total} = {det_rate:.1f}%")
+    print(f"视觉检测率: {n_vision}/{total} = {vis_rate:.1f}%")
+    if USE_POST_PROCESS:
+        print(f"后处理后可用率: {n_usable}/{total} = {usable_rate:.1f}% (插值 {n_interp} + 保持 {n_hold})")
     print(f"Visualized video saved to: {final_path}")
     print("Done.")
 
